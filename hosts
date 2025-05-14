@@ -1,0 +1,2 @@
+[adopet]
+192.168.1.11 ansible_user=gabriel ansible_ssh_private_key_file='/home/gabriel/workspaces/vsc/iac-terraform-ansible/keys/MeuWebServerKey.pem'

@@ -1,0 +1,6 @@
+---
+- hosts: adopet
+  become: yes
+  roles:
+    - adopet
+    - postgres

@@ -1,0 +1,205 @@
+---
+- name: Instalar dependências do PostgreSQL e cliente
+  ansible.builtin.apt:
+    name:
+      - postgresql
+      - postgresql-contrib
+      - python3-psycopg2
+    state: latest
+    update_cache: yes
+  become: yes
+
+- name: Garantir que o serviço do PostgreSQL esteja ativo
+  ansible.builtin.service:
+    name: postgresql
+    state: started
+    enabled: yes
+  become: yes
+
+- name: Verificar se o usuário '{{ db_user }}' já existe no PostgreSQL
+  ansible.builtin.shell: |
+    sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='{{ db_user }}'" | grep -q 1
+  register: user_exists
+  ignore_errors: yes
+  become: yes
+  args:
+    executable: /bin/bash
+  changed_when: false
+
+- name: Criar usuário '{{ db_user }}' no PostgreSQL (caso não exista)
+  ansible.builtin.shell: |
+    sudo -u postgres psql -c "CREATE ROLE {{ db_user }} WITH SUPERUSER LOGIN PASSWORD '{{ db_password }}';"
+  when: user_exists.rc != 0  # Execute somente se o usuário não existir
+  become: yes
+  args:
+    executable: /bin/bash
+
+- name: Verificar se o banco de dados '{{ db_name }}' já existe
+  ansible.builtin.shell: |
+    sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='{{ db_name }}'" | grep -q 1
+  register: db_exists
+  ignore_errors: yes
+  become: yes
+  args:
+    executable: /bin/bash
+  changed_when: false
+
+- name: Criar banco de dados '{{ db_name }}' com owner '{{ db_user }}' (caso não exista)
+  ansible.builtin.shell: |
+    sudo -u postgres psql -c "CREATE DATABASE {{ db_name }} OWNER {{ db_user }};"
+  when: db_exists.rc != 0  # Execute somente se o banco de dados não existir
+  become: yes
+  args:
+    executable: /bin/bash
+
+- name: Copiar dump do banco para /var/lib/postgresql/adopet-dump.sql
+  ansible.builtin.copy:
+    src: dump-db/adopet-dump.sql
+    dest: /var/lib/postgresql/adopet-dump.sql
+    owner: postgres
+    group: postgres
+    mode: '0644'
+  become: yes
+
+- name: Verificar se banco '{{ db_name }}' já possui tabelas
+  ansible.builtin.shell: |
+    sudo -u postgres psql -d {{ db_name }} -tAc "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public';"
+  register: tabela_check
+  changed_when: false
+
+- name: Restaurar dump no banco de dados '{{ db_name }}'
+  ansible.builtin.shell: |
+    sudo -u postgres pg_restore -d {{ db_name }} -v /var/lib/postgresql/adopet-dump.sql
+  args:
+    executable: /bin/bash
+  become: yes
+  when: tabela_check.stdout|int == 0
+
+- name: Alterar configurações no arquivo .env
+  ansible.builtin.lineinfile:
+    path: /home/gabriel/adopet/.env
+    regexp: '^DB_HOST='
+    line: 'DB_HOST=localhost'
+  become: no
+
+- name: Alterar nome do banco no arquivo .env
+  ansible.builtin.lineinfile:
+    path: /home/gabriel/adopet/.env
+    regexp: '^DB_NAME='
+    line: 'DB_NAME=adopetdb'
+  become: no
+
+- name: Alterar o user do banco no arquivo .env
+  ansible.builtin.lineinfile:
+    path: /home/gabriel/adopet/.env
+    regexp: '^DB_USERNAME='
+    line: 'DB_USERNAME=adopet'
+  become: no
+
+- name: Alterar a senha do banco no arquivo .env
+  ansible.builtin.lineinfile:
+    path: /home/gabriel/adopet/.env
+    regexp: '^DB_PASSWORD='
+    line: 'DB_PASSWORD=12345'
+  become: no
+
+- name: Verificar se node_modules existe
+  stat:
+    path: /home/gabriel/adopet/node_modules
+  register: node_modules_stat
+
+- name: Instalar dependências do projeto com npm
+  ansible.builtin.shell: /home/gabriel/.volta/bin/npm install
+  args:
+    chdir: /home/gabriel/adopet
+  environment:
+    PATH: "/home/gabriel/.volta/bin:{{ ansible_env.PATH }}"
+  when: not node_modules_stat.stat.exists
+  become: no
+
+- name: Compilar o projeto (build)
+  ansible.builtin.command: /home/gabriel/.volta/bin/npm run build
+  args:
+    chdir: /home/gabriel/adopet
+    creates: /home/gabriel/adopet/dist/main.js
+  register: build_output
+  changed_when: "'skipped' not in build_output.stdout"  # Verifica se o build foi realmente realizado
+  failed_when: false  # Para evitar falhas caso algum erro ocorra durante o build
+  environment:
+    PATH: "/home/gabriel/.volta/bin:{{ ansible_env.PATH }}"
+  become: no
+
+- name: Verificar se processo 'adopet' já está rodando no PM2
+  ansible.builtin.shell: |
+    /home/gabriel/.volta/bin/pm2 list | grep adopet
+  register: pm2_adopet_status
+  failed_when: false
+  changed_when: false
+  args:
+    executable: /bin/bash
+  become: no
+
+- name: Iniciar projeto com PM2 se ainda não estiver rodando
+  ansible.builtin.shell: |
+    /home/gabriel/.volta/bin/pm2 start dist/main.js --name adopet
+  args:
+    chdir: /home/gabriel/adopet
+    executable: /bin/bash
+  environment:
+    PATH: "/home/gabriel/.volta/bin:{{ ansible_env.PATH }}"
+  when: pm2_adopet_status.rc != 0
+  become: no
+
+- name: Reiniciar projeto com PM2 se já estiver rodando e houve build
+  ansible.builtin.shell: /home/gabriel/.volta/bin/pm2 restart adopet
+  args:
+    chdir: /home/gabriel/adopet
+    executable: /bin/bash
+  environment:
+    PATH: "/home/gabriel/.volta/bin:{{ ansible_env.PATH }}"
+  when: pm2_adopet_status.rc == 0 and build_output is changed
+  become: no
+
+- name: Verificar se o PM2 startup já está configurado
+  ansible.builtin.stat:
+    path: /etc/systemd/system/pm2-gabriel.service
+  register: pm2_service
+
+- name: Executar 'pm2 startup' corretamente no ambiente do usuário gabriel
+  ansible.builtin.shell: |
+    pm2 startup systemd -u gabriel --hp /home/gabriel
+  args:
+    executable: /bin/bash
+  register: pm2_startup_output
+  become: false
+  become_user: gabriel
+  environment:
+    PATH: "/home/gabriel/.volta/bin:{{ ansible_env.PATH }}"
+  failed_when: false
+  when: not pm2_service.stat.exists
+
+- name: Extrair comando sugerido pelo PM2 para startup
+  ansible.builtin.set_fact:
+    pm2_sudo_cmd: "{{ pm2_startup_output.stdout_lines | select('search', '^sudo') | list | first }}"
+  when: not pm2_service.stat.exists
+
+- name: Executar comando de inicialização sugerido pelo PM2 como root (ajustado)
+  ansible.builtin.shell: >
+    env PATH=$PATH:/home/gabriel/.volta/tools/image/node/22.15.0/bin
+    /home/gabriel/.volta/tools/image/packages/pm2/bin/pm2 startup systemd -u gabriel --hp /home/gabriel
+  args:
+    executable: /bin/bash
+  become: yes
+  when: not pm2_service.stat.exists
+
+- name: Salvar o estado atual do PM2
+  ansible.builtin.shell: |
+    pm2 save
+  args:
+    executable: /bin/bash
+  become: false
+  become_user: gabriel
+  environment:
+    PATH: "/home/gabriel/.volta/bin:{{ ansible_env.PATH }}"
+  when: not pm2_service.stat.exists
+

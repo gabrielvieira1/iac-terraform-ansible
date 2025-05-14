@@ -1,0 +1,71 @@
+- name: Verificar se o repositório já foi clonado
+  stat:
+    path: /home/gabriel/adopet/.git
+  register: repo_exists
+  become: false
+
+- name: Clonar repositório da Alura - branch projeto-inicial (caso não exista)
+  ansible.builtin.git:
+    repo: https://github.com/alura-cursos/3858-iniciando-cloud-4.git
+    dest: /home/gabriel/adopet
+    version: projeto-inicial
+    force: no
+  when: not repo_exists.stat.exists
+  become: false
+
+- name: Instalar Volta (gerenciador de versões Node)
+  ansible.builtin.shell: curl https://get.volta.sh | bash
+  args:
+    executable: /bin/bash
+    creates: /home/gabriel/.volta
+  environment:
+    VOLTA_HOME: /home/gabriel/.volta
+  become: false
+
+- name: Adicionar Volta ao PATH no .bashrc
+  ansible.builtin.lineinfile:
+    path: /home/gabriel/.bashrc
+    line: 'export PATH="$HOME/.volta/bin:$PATH"'
+    insertafter: EOF
+  become: false
+
+- name: Recarregar o .bashrc para aplicar o PATH do Volta
+  ansible.builtin.shell: source /home/gabriel/.bashrc
+  args:
+    executable: /bin/bash
+  become: false
+
+- name: Verificar se o Node está disponível via Volta
+  ansible.builtin.shell: /home/gabriel/.volta/bin/volta which node
+  args:
+    executable: /bin/bash
+  register: node_check
+  ignore_errors: true
+  failed_when: false
+  changed_when: false
+  become: false
+
+- name: Instalar Node LTS via Volta
+  ansible.builtin.shell: /home/gabriel/.volta/bin/volta install node
+  environment:
+    PATH: "/home/gabriel/.volta/bin:{{ ansible_env.PATH }}"
+  args:
+    executable: /bin/bash
+  become: false
+  when: node_check.rc != 0
+
+- name: Verificar se o PM2 já está instalado
+  ansible.builtin.shell: /home/gabriel/.volta/bin/pm2 --version
+  register: pm2_check
+  failed_when: false
+  changed_when: false
+  become: false
+
+- name: Instalar PM2 globalmente (caso não esteja instalado)
+  ansible.builtin.shell: /home/gabriel/.volta/bin/npm install -g pm2
+  environment:
+    PATH: "/home/gabriel/.volta/bin:{{ ansible_env.PATH }}"
+  args:
+    executable: /bin/bash
+  become: false
+  when: pm2_check.rc != 0
